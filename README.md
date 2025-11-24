@@ -64,10 +64,10 @@ The core task—calculating distances for millions of vectors—is "embarrassing
 
 The key shows in maximizing parallelism and efficiency across the two main K-Means steps:
 
-| Component | Description | **Acceleration & Optimization** | function 
-| :--- | :--- | :--- | :---|
-| **Massive Parallel steps (Assignment)** | Utilizing the GPU's SIMT (Single Instruction, Multiple Threads) architecture, each of the $N$ data points is assigned a dedicated thread to calculate its distance to all $K$ centroids independently. | Compute-Bound Optimization: This transforms the heavy $O(N \times K)$ matrix operation into a massively parallel workload. It fully saturates the GPU's CUDA cores and hides memory latency through high arithmetic intensity. | **assignAndAccumulateKernel**|
-| **GPU-Optimized M-step (Relocation)** | Uses thread-safe **`atomicAdd`** operations to efficiently accumulate the vector sums and counts for each of the $K$ partitions (clusters). | Minimizes synchronization and reduces the overall training time. | **updateCentroidsKernel**|
+|name|Component | Description | **Acceleration & Optimization** | function 
+| :---|:--- | :--- | :--- | :---|
+|**E-step**| **Massive Parallel steps (Assignment)** | Utilizing the GPU's SIMT (Single Instruction, Multiple Threads) architecture, each of the $N$ data points is assigned a dedicated thread to calculate its distance to all $K$ centroids independently. | Compute-Bound Optimization: This transforms the heavy $O(N \times K)$ matrix operation into a massively parallel workload. It fully saturates the GPU's CUDA cores and hides memory latency through high arithmetic intensity. | **assignAndAccumulateKernel**|
+|**M-step**| **GPU-Optimized M-step (Relocation)** | Uses thread-safe **`atomicAdd`** operations to efficiently accumulate the vector sums and counts for each of the $K$ partitions (clusters). | Minimizes synchronization and reduces the overall training time. | **updateCentroidsKernel**|
 
 
 ```c++
@@ -241,7 +241,7 @@ nvcc -O3 -std=c++17 -arch=sm_70 origin.cu -o origin -Wno-deprecated-gpu-targets
 
 ### CUDA version
 
-<img src="docs/cuda_kmean.png" width="400" alt="cuda_kmean" />
+<img src="docs/cuda_kmean_atadd.png" width="400" alt="cuda_kmean_atadd" />
 
 ### C++ version
 
@@ -250,13 +250,154 @@ nvcc -O3 -std=c++17 -arch=sm_70 origin.cu -o origin -Wno-deprecated-gpu-targets
 
 | n            |     C++ (ms) |   CUDA (ms) | SpeedUp (sequential VS parallel) |
 | ------------ | ---------: | ---------: | ---------: | 
-| 2^8          | |||
-| 2^10 (1024)  |   |    |     |
-| 2^14         | | | |
-| 2^20 (8192)  |   |  |    |
-| 2^24 (16.7M) |  |  |  |
+| 2^24 (16.7M) |  | 16.48 S |  |
 
 ---
+
+## Already Achieve time Speedup ? Could be faster ?
+
+Yes,The first version of **assignAndAccumulateKernel** just simply implemented algorithm in primary performance in the K-Means E-Step, when accumulating centroid sums and counts, relay in the use of global atomicAdd operations.This technique involves allocating a private accumulation buffer in global memory for each thread block.
+
+- The initial version of kmean e-step :
+
+<img src="docs/cuda_global_atomic.png" width="400" alt="cuda_global_atomic" />
+
+ This is necessary because millions of threads  must update a small number of shared locations ($K$ centroids). This high contention forces the GPU's parallel execution into a severe serialization queue, significantly undermining throughput. The optimal solution is to implement Per-Block or sharding computation to reduce data racing. 
+
+Threads within a block perform their atomic updates exclusively to this private buffer.
+<img src="docs/cuda_shared_atomic.png" width="400" alt="cuda_shared_atomic" />
+
+And We achieved Much faster 3x speedup then initial Version Since different blocks write to entirely separate memory regions, the debilitating cross-block contention is eliminated.Second, much faster reduction step is then used to merge these $B$ block-local sums into the final $K$ centroid values, unlocking the GPU's full parallelism for the most time-consuming phase.
+
+
+```c++
+ // E-Step:
+// 1. Tiled Shared Memory loading for Centroids.
+// 2. Per-Block Accumulation.
+__global__ void assignAndAccumulatePerBlockKernel(
+                                         const float* data, int N,
+                                         const float* centroids, int K,
+                                         int* assign,
+                                         double* block_sums,   // Output: (GridSize * K * DIM)
+                                         int* block_counts) {  // Output: (GridSize * K)
+    
+    // Shared memory buffer to cache a tile of centroids
+    __shared__ float sh_centroids[TILE_K * DIM];
+    
+    // Offsets for this specific block's accumulation buffer in global memory
+    size_t block_sum_base = (size_t)blockIdx.x * (size_t)K * DIM;
+    size_t block_count_base = (size_t)blockIdx.x * (size_t)K;
+
+    // Grid-Stride Loop
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < N;
+         i += gridDim.x * blockDim.x) {
+
+        const float* xi = data + (size_t)i * DIM;
+
+        int bestC = 0;
+        float bestD = 1e30f;
+        
+        // Loop over Centroids in chunks (Tiles)
+        for (int k_tile = 0; k_tile < K; k_tile += TILE_K) {
+            
+            // --- Phase 1: Load Tile into Shared Memory ---
+            int k_start = k_tile;
+            
+            // Cooperative loading: threads load distinct floats
+            for (int t = threadIdx.x; t < TILE_K * DIM; t += blockDim.x) {
+                int local_c = t / DIM;
+                int local_d = t % DIM;
+                int global_c = k_start + local_c;
+                
+                if (global_c < K) {
+                    sh_centroids[t] = centroids[(size_t)global_c * DIM + local_d];
+                } else {
+                    sh_centroids[t] = 0.0f; // Padding
+                }
+            }
+            __syncthreads(); // Wait for tile load to complete
+            
+            // --- Phase 2: Compute Distances against Tile ---
+            int k_limit = (k_tile + TILE_K > K) ? (K - k_tile) : TILE_K;
+
+            for (int c_local = 0; c_local < k_limit; ++c_local) {
+                int c_global = k_start + c_local;
+                
+                float dot = 0.f;
+                
+                for (int d = 0; d < DIM; ++d) {
+                    dot += xi[d] * sh_centroids[c_local * DIM + d];
+                }
+                
+                float dist = 1.f - dot;
+                if (dist < bestD) {
+                    bestD = dist;
+                    bestC = c_global;
+                }
+            }
+            __syncthreads(); // Sync before loading next tile
+        }
+
+        assign[i] = bestC;
+
+        // --- Accumulation ---
+        // We atomicAdd to THIS block's specific buffer.
+        atomicAdd(&block_counts[block_count_base + bestC], 1);
+
+        size_t cluster_base = block_sum_base + (size_t)bestC * DIM;
+        for (int d = 0; d < DIM; ++d) {
+            atomicAdd(&block_sums[cluster_base + d], (double)xi[d]);
+        }
+    }
+}
+
+```
+
+then After block acculumation , the merge part would be process by **reduceSumsKernel ** to summary the final_sum for update centroids next
+
+``` c++
+__global__ void reduceSumsKernel(double* final_sums, 
+                                 int* final_counts, 
+                                 const double* block_sums, 
+                                 const int* block_counts, 
+                                 int K, int GridSize) {
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Reduce Counts: 1 thread per cluster
+    if (idx < K) {
+        int total_cnt = 0;
+        for (int b = 0; b < GridSize; ++b) {
+            total_cnt += block_counts[(size_t)b * K + idx];
+        }
+        final_counts[idx] = total_cnt;
+    }
+    
+    // Reduce Sums
+    size_t total_elements = (size_t)K * DIM;
+    for (size_t i = idx; i < total_elements; i += gridDim.x * blockDim.x) {
+        double total_sum = 0.0;
+        for (int b = 0; b < GridSize; ++b) {
+            total_sum += block_sums[(size_t)b * total_elements + i];
+        }
+        final_sums[i] = total_sum;
+    }
+}
+
+```
+
+Threads within a block perform their atomic updates exclusively to this private buffer.
+<img src="docs/cuda_kmean_shared.png" width="600" alt="cuda_kmean_shared" />
+
+### SpeedUp Comparison
+
+| n            |     C++ (S) |   CUDA global AtomicAdd (S) | SpeedUp | CUDA shared AtomicAdd (S)  | SpeedUp |
+| ------------: | ---------: | ---------: | ---------: | ---------: | ---------: | 
+| 2^24 (16.7M) |  | 16.48 S |  |10.68 S||
+---
+
+
 
 ## Simulation Explain
 
@@ -315,4 +456,9 @@ static Vec cardToVec(const int card[25]) {
 
 
 ## Reference
+
+
+[1] [Approximate Nearest Neighbor Search: Small World Approach](https://www.researchgate.net/publication/265580627_Approximate_Nearest_Neighbor_Search_Small_World_Approach)
+
+[2] [vector_search_database](http://research.baidu.com/Public/uploads/5f5c37aa9c37c.pdf)
 
