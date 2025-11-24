@@ -33,7 +33,7 @@ Imagine you are a logistics giant (like Amazon) operating in a massive city with
 
  *  Day 1: Blind Selection (Initialization)You don't know where the customers live yet, so you randomly drop 1,024 temporary kiosks on the map. Some land in lakes; some land in empty fields. It is inefficient.
 
- *  The "Assignment" Morning (Assignment-Step)Every single one of the 16 million customers checks their GPS to find which of the 1,024 kiosks is closest to their home. They register themselves: "I belong to Station #5."(In Code: The GPU calculates 16M $\times$ 1024 distances in parallel.)
+ *  The "Assignment" Morning (Assignment-Step)Every single one of the 16 million customers checks their GPS to find which of the 1,024 kiosks is closest to their home. They register themselves: "I belong to Station #5."(In Code: The GPU calculates 16M $\times$ 2048 distances in parallel.)
 
  * The "Relocation" Evening (Relocation-Step)The manager of Station #5 looks at his list and realizes: "All my customers live 3 miles north, but I'm stuck here in the south."He calculates the exact geographic center (average coordinate) of all his registered customers and moves the station there overnight to be closer to everyone.
 
@@ -71,56 +71,99 @@ The key shows in maximizing parallelism and efficiency across the two main K-Mea
 
 
 ```c++
-__global__ void assignAndAccumulateKernel(const float* data,int N,const float* centroids,int K,int* assign,float* sums,int* counts) {
+// E-step: Assign data to nearest centroid (E-Step: Data Assignment)
+__global__ void assignAndAccumulateKernel(const float* data,      // [Input] Dataset (N * DIM)
+                                          int N,                 // Total number of data points
+                                          const float* centroids, // [Input] Centroids (K * DIM)
+                                          int K,                 // Total number of clusters K
+                                          int* assign,            // [Output] Assignment results (N elements, storing 0..K-1)
+                                          double* sums,           // [Output] Accumulator: Centroid vector sums (K * DIM, using double precision)
+                                          int* counts)           // [Output] Accumulator: Centroid counts (K elements)
+{
+    // Each thread processes one or more data points
     for (int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < N;
          i += gridDim.x * blockDim.x) {
 
+        // Get the starting pointer for the current data point xi
         const float* xi = data + (size_t)i * DIM;
 
         int bestC = 0;
-        float bestD = 1e30f;
+        // Initialize the minimum distance with a sufficiently large number (e.g., FLT_MAX)
+        float bestD = 1e30f; 
 
+        // Iterate through all K centroids to find the closest one
         for (int c = 0; c < K; ++c) {
+            // Get the starting pointer for the current centroid ctr
             const float* ctr = centroids + (size_t)c * DIM;
-            float dot = 0.f;
+            
+            // Use double precision for dot product accumulation to improve numerical stability
+            double dot_double = 0.0; 
             for (int d = 0; d < DIM; ++d) {
-                dot += xi[d] * ctr[d];
+                // Promote float values to double for multiplication and addition
+                dot_double += (double)xi[d] * (double)ctr[d]; 
             }
+            float dot = (float)dot_double; // Convert the final result back to float for distance comparison
+            
+            // Calculate cosine distance: 1.0 - similarity (similarity is the dot product)
             float dist = 1.f - dot;
+            
+            // Update the nearest centroid
             if (dist < bestD) {
                 bestD = dist;
                 bestC = c;
             }
         }
 
+        // Record the assignment result for data point i
         assign[i] = bestC;
+
+        // Atomic add to accumulators (Atomic operations resolve concurrent write conflicts)
+        // Accumulate count
         atomicAdd(&counts[bestC], 1);
+        
+        // Accumulate vector sum
         size_t base = (size_t)bestC * DIM;
         for (int d = 0; d < DIM; ++d) {
-            atomicAdd(&sums[base + d], xi[d]);
+            // Convert the float xi[d] to double before atomically adding to the double sums array
+            atomicAdd(&sums[base + d], (double)xi[d]); 
         }
     }
 }
 
+// -----------------------------------------------------------------------------
 
-// Update centroids
-__global__ void updateCentroidsKernel(float* centroids,const float* sums,const int* counts,int K) {
+// M-step: Update centroids (M-Step: Centroid Update)
+__global__ void updateCentroidsKernel(float* centroids,      // [Output] Centroids (updated values)
+                                      const double* sums,    // [Input] Accumulated vector sums (double precision)
+                                      const int* counts,     // [Input] Accumulated counts
+                                      int K) {
+    // Each thread processes one centroid c
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= K) return;
 
     int cnt = counts[c];
-    float* ctr = centroids + (size_t)c * DIM;
-    const float* sumc = sums + (size_t)c * DIM;
+    float* ctr = centroids + (size_t)c * DIM;      // Pointer to the centroid to be updated
+    const double* sumc = sums + (size_t)c * DIM;   // Pointer to the vector sum for centroid c
 
-    if (cnt > 0) {
+    if (cnt > 0) { // Only update centroids that were assigned data points
         double norm2 = 0.0;
         for (int d = 0; d < DIM; ++d) {
-            float v = sumc[d] / (float)cnt;
+            // FIX: Use double for precise average calculation (sum / count)
+            double v_double = sumc[d] / (double)cnt;
+            float v = (float)v_double; // Convert result back to float for storage
+            
             ctr[d] = v;
-            norm2 += (double)v * (double)v;
+            
+            // Use double precision to accumulate the squared norm, preparing for unit normalization
+            norm2 += v_double * v_double; 
         }
-        float n = float(std::sqrt(norm2) + 1e-12);
+        
+        // Centroid Normalization (Unit Length)
+        // Calculate the L2 norm (magnitude)
+        float n = float(std::sqrt(norm2) + 1e-12); 
+        
+        // Normalize the centroid vector onto the unit sphere
         for (int d = 0; d < DIM; ++d) {
             ctr[d] /= n;
         }
@@ -267,15 +310,6 @@ static Vec cardToVec(const int card[25]) {
     return out;
 }
 ```
-
----
-
-
-
-## Future Optimization Strategy
-
-While the heavy reliance on **atomicAdd** creates a performance bottleneck, this initial version is designed to be the most faithful implementation of the standard ANN K-Means logic. Consequently, future performance optimizations should prioritize mitigating the contention caused by these atomic operations
-
 
 ---
 
