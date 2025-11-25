@@ -241,22 +241,38 @@ nvcc -O3 -std=c++17 -arch=sm_70 origin.cu -o origin -Wno-deprecated-gpu-targets
 
 ### CUDA version
 
-<img src="docs/cuda_kmean_atadd.png" width="400" alt="cuda_kmean_atadd" />
+<img src="docs/cuda_kmean_global_atomic_216.jpg" width="400" alt="cuda_kmean_global_atomic_216" />
+
+**assignAndAccumulateKernel** (E-step, main workload)
+
+Total Time: ~52.36 ms
+Calls: 15 (same as KMEANS_ITERS=15)
+Average per iteration: ~3.49 ms
+
+**updateCentroidsKernel** (M-step, centroid update)
+Total Time: ~0.34 ms
+
+Average per iteration: ~0.02 ms
+
+K-Means GPU compute (E-step + M-step)
+~52.7 ms
 
 ### C++ version
+
+<img src="docs/kmean_cpp_216.png" width="400" alt="kmean_cpp_216" />
 
 
 ### SpeedUp Comparison
 
-| n            |     C++ (ms) |   CUDA (ms) | SpeedUp (sequential VS parallel) |
+| n            |     C++ (ms) |   CUDA (ms) | SpeedUp ( sequential vs parallel ) |
 | ------------ | ---------: | ---------: | ---------: | 
-| 2^24 (16.7M) |  | 16.48 S |  |
+| 2^16 (65536) | 262177.456000 ms | 52.7 ms | 4974x |
 
 ---
 
 ## Already Achieve time Speedup ? Could be faster ?
 
-Yes,The first version of **assignAndAccumulateKernel** just simply implemented algorithm in primary performance in the K-Means E-Step, when accumulating centroid sums and counts, relay in the use of global atomicAdd operations.This technique involves allocating a private accumulation buffer in global memory for each thread block.
+Yes,The first version of **assignAndAccumulateKernel** just simply implemented algorithm in primary performance in the K-Means E-Step, when accumulating centroid sums and counts, relay in the use of global `atomicAdd` operations.This technique involves allocating a private accumulation buffer in global memory for each thread block.
 
 - The initial version of kmean e-step :
 
@@ -267,7 +283,7 @@ Yes,The first version of **assignAndAccumulateKernel** just simply implemented a
 Threads within a block perform their atomic updates exclusively to this private buffer.
 <img src="docs/cuda_shared_atomic.png" width="400" alt="cuda_shared_atomic" />
 
-And We achieved Much faster 3x speedup then initial Version Since different blocks write to entirely separate memory regions, the debilitating cross-block contention is eliminated.Second, much faster reduction step is then used to merge these $B$ block-local sums into the final $K$ centroid values, unlocking the GPU's full parallelism for the most time-consuming phase.
+And We achieved Much faster least 3x speedup then initial Version Since different blocks write to entirely separate memory regions, the debilitating cross-block contention is eliminated.Second, much faster reduction step is then used to merge these $B$ block-local sums into the final $K$ centroid values, unlocking the GPU's full parallelism for the most time-consuming phase.
 
 
 ```c++
@@ -354,7 +370,7 @@ __global__ void assignAndAccumulatePerBlockKernel(
 
 ```
 
-then After block acculumation , the merge part would be process by **reduceSumsKernel ** to summary the final_sum for update centroids next
+then After block acculumation , the merge part would be process by `reduceSumsKernel` to summary the final_sum for update centroids next
 
 ``` c++
 __global__ void reduceSumsKernel(double* final_sums, 
@@ -388,18 +404,35 @@ __global__ void reduceSumsKernel(double* final_sums,
 ```
 
 Threads within a block perform their atomic updates exclusively to this private buffer.
-<img src="docs/cuda_kmean_shared.png" width="600" alt="cuda_kmean_shared" />
 
-### SpeedUp Comparison
 
-| n            |     C++ (S) |   CUDA global AtomicAdd (S) | SpeedUp | CUDA shared AtomicAdd (S)  | SpeedUp |
+### SpeedUp Comparison of Training Time Extraction between
+
+<img src="docs/cuda_global_atomic_224.jpg" width="600" alt="cuda_global_atomic_224" />
+
+<img src="docs/cuda_share_mem_224.png" width="600" alt="cuda_share_mem_224" />
+
+The data is sourced from `nvprof` performance analyses of two K-Means implementations:
+
+| Version | Description | Corresponding function |
+| :--- | :--- | :--- |
+| **Global Atomic (Baseline)** | Relies on Global Memory and atomic operations for centroid updates. | `assignAndAccumulateKernel` |
+| **Shared Memory (Optimized)** | Uses CUDA **Shared Memory** to reduce global memory access and synchronization overhead. | `assignAndAccumulatePerBlockKernel` |
+
+
+
+extracted the total program runtime (`Time`) from the `nvprof` output under the `Profiling result:` section and converted it to milliseconds (ms).
+
+And Due to DataSize of 2^24 c++ sequential code havent even finished within 30mins
+
+| n            |     C++ (ms) |   CUDA global AtomicAdd (ms) | SpeedUp | CUDA shared AtomicAdd (ms)  | SpeedUp (global Atomic vs Shared Memory) |
 | ------------: | ---------: | ---------: | ---------: | ---------: | ---------: | 
-| 2^24 (16.7M) |  | 16.48 S |  |10.68 S||
+| 2^24 (16.7M) | * | 10324 mS |at least 5000x| 4524 mS| 2.28x|
 ---
 
 
 
-## Simulation Explain
+## Appendix :Simulation Explain
 
 To test the scalability and performance of the accelerated K-Means implementation, the project generates and use a large, synthetic dataset that simulates structured, high-dimensional vector embeddings.
 
