@@ -204,7 +204,7 @@ These define the scale and quality of the partitioning infrastructure:
 
 To validate the efficiency and quality of the accelerated K-Means output, we perform a subsequent ANN Search Verification step.
 
-After the process of training, the code will generates $K$ highly optimized centroids and assigns $N$ data points to one of these $K$ partitions. And Convert them into $K$ number of IVFs (Inverted File Index)| This output is the last critical stage for building the ANN search structure
+After the process of training, the code will generate $K$ highly optimized centroids and assign $N$ data points to one of these $K$ partitions each. These will be converted into $K$ number of IVFs (Inverted File Index); This output is the last critical stage for building the ANN search structure.
 
 ```c++
 
@@ -223,18 +223,19 @@ static void buildInvertedLists(
 }
 ```
 
-### The core goal 
+### Target Output
 
-this step is to accurately identify the $TOPK$ nearest neighbors to a query vector $Q$ among the entire massive dataset of $N$ vectors.
-And compare how speedup we achieved by using **CUDA** acclerration comparing sequential process via **C++**
+This step is to accurately identify the $TOPK$ nearest neighbors to a query vector $Q$ among the entire massive dataset of $N$ vectors.
 
-* This is accomplished by leveraging the trained partitions: first, the query $Q$ is compared against the $K$ centroids for a Coarse Search to select the closest $N_{PROBE}$ partitions; second, all vectors from these selected partitions are collected into a Candidate Set; and finally, an optimized Top-K Final Search is executed solely on this small candidate set to pinpoint and return the $TOPK$ results. The successful and rapid execution of this entire sequence confirms that the K-Means acceleration was effective in building a high-quality, scalable foundation for search retrieval.
+Based on the results of this step, we can compare how much speedup we achieved by using **CUDA** acceleration as opposed to the sequential process via **C++**
+
+* This is accomplished by leveraging the trained partitions: first, the query $Q$ is compared against the $K$ centroids for a Coarse Search to select the closest $N_{PROBE}$ partitions; second, all vectors from these selected partitions are collected into a Candidate Set; and finally, an optimized Top-K Final Search is executed solely on this small candidate set to pinpoint and return the $TOPK$ results. 
 
 ---
 
 ## Environment and Execution
 
-* **Jupyter Server:** :CUDA Version: 12.9   
+* **Jupyter Server:** CUDA Version: 12.9   
 * **Software:** NVIDIA CUDA Toolkit (v11.x+), `nvcc` compiler.
 * **gcc:** Version c++ 17
 
@@ -259,15 +260,14 @@ nvcc -O3 -std=c++17 -arch=sm_70 origin.cu -o origin -Wno-deprecated-gpu-targets
 
 **assignAndAccumulateKernel** (E-step, main workload)
 
-Total Time: ~52.36 ms
-Calls: 15 (same as KMEANS_ITERS=15)
+Total Time: ~52.36 ms \
+Calls: 15 (same as KMEANS_ITERS=15) \
 Average per iteration: ~3.49 ms
 
 **updateCentroidsKernel** (M-step, centroid update)
-Total Time: ~0.34 ms
 
-Average per iteration: ~0.02 ms
-
+Total Time: ~0.34 ms \
+Average per iteration: ~0.02 ms \
 K-Means GPU compute (E-step + M-step)
 ~52.7 ms
 
@@ -276,7 +276,7 @@ K-Means GPU compute (E-step + M-step)
 <img src="docs/kmean_cpp_216.png" width="400" alt="kmean_cpp_216" />
 
 
-### SpeedUp Comparison
+### Speedup Comparison
 
 | n            |     C++ (ms) |   CUDA (ms) | SpeedUp ( sequential vs parallel ) |
 | ------------ | ---------: | ---------: | ---------: | 
@@ -284,7 +284,9 @@ K-Means GPU compute (E-step + M-step)
 
 ---
 
-## Already Achieve time Speedup ? Could be faster ?
+## We already achieved a large time speedup, but can it be faster?
+
+
 
 Yes,The first version of **assignAndAccumulateKernel** just simply implemented algorithm in primary performance in the K-Means E-Step, when accumulating centroid sums and counts, relay in the use of global `atomicAdd` operations.This technique involves allocating a private accumulation buffer in global memory for each thread block.
 
