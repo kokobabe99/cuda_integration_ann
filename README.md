@@ -20,7 +20,7 @@ It is one of the most fundamental and widely used Unsupervised Machine Learning 
 
 
 
-## How is K-means trained in C++ code ?
+## How is K-means trained in C++ code?
 
 ---
 
