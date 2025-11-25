@@ -24,33 +24,47 @@ It is one of the most fundamental and widely used Unsupervised Machine Learning 
 
 ---
 
-## A simple Case to describe demo
+## An example case to illustrate K-means
 
 
 Imagine you are a logistics giant (like Amazon) operating in a massive city with 16 million customers ($N$). Your goal is to build 1,024 delivery stations ($K$) to ensure every customer gets the fastest service possible.
 
-* **Phase 1: K-Means Training (Building the Network)**
+**Phase 1: K-Means Training (Building the Network)**
 
- *  Day 1: Blind Selection (Initialization)You don't know where the customers live yet, so you randomly drop 1,024 temporary kiosks on the map. Some land in lakes; some land in empty fields. It is inefficient.
+ *  Day 1: Blind Selection (Initialization) 
+ 
+    You don't know where the customers live yet, so you randomly drop 1,024 temporary kiosks on the map. Some land in lakes; some land in empty fields. It is inefficient.
 
- *  The "Assignment" Morning (Assignment-Step)Every single one of the 16 million customers checks their GPS to find which of the 1,024 kiosks is closest to their home. They register themselves: "I belong to Station #5."(In Code: The GPU calculates 16M $\times$ 2048 distances in parallel.)
+ *  The "Assignment" Morning (Assignment-Step) 
+ 
+    Every single one of the 16 million customers checks their GPS to find which of the 1,024 kiosks is closest to their home. They register themselves: "I belong to Station #5."(In Code: The GPU calculates 16M $\times$ 2048 distances in parallel.)
 
- * The "Relocation" Evening (Relocation-Step)The manager of Station #5 looks at his list and realizes: "All my customers live 3 miles north, but I'm stuck here in the south."He calculates the exact geographic center (average coordinate) of all his registered customers and moves the station there overnight to be closer to everyone.
+ * The "Relocation" Evening (Relocation-Step)
+ 
+    The manager of Station #5 looks at his list and realizes: "All my customers live 3 miles north, but I'm stuck here in the south."He calculates the exact geographic center (average coordinate) of all his registered customers and moves the station there overnight to be closer to everyone.
 
- * Iteration (Convergence)Because the stations moved, some customers realize a different station is now closer. They switch registrations. The stations move again to adjust. After 15 days (iterations), the stations stop moving. They are now perfectly positioned in the center of the 1,024 most dense population hubs.
+ * Iteration (Convergence)
+    
+    Because the stations moved, some customers realize a different station is now closer. They switch registrations. The stations move again to adjust. After 15 days (iterations), the stations stop moving. They are now perfectly positioned in the center of the 1,024 most dense population hubs.
 
-* **Phase 2: IVF Search (Delivering the Package)**
+**Phase 2: IVF Search (Delivering the Package)**
 
 Now a new order comes in (The Query Vector $q$). 
 
 We need to find which existing customer is most similar to this new order (Nearest Neighbor).
 
-* The Old Way (Brute Force)You send a driver to knock on all 16 million doors in the city to see who placed the order.Result: It takes 4 seconds. The pizza is cold. The customer is angry.
+* The Old Way (Brute Force)
 
-* The New Way (IVF Search)Step A: Coarse Search (Find the District)Instead of looking at houses, you only look at the 1,024 Delivery Stations. You calculate: "Which station is closest to this new order address?"You find that Station #5 (and maybe its neighbors, Station #6 and #7) is the closest.Step B: Fine Search (Last Mile)You open the list for Station #5. It only serves 15,000 customers. You only check these specific houses.Result: You found the target in 15 milliseconds. The pizza is stillhot.
+    You send a driver to knock on all 16 million doors in the city to see who placed the order. Result: It takes 4 seconds. The pizza is cold. The customer is angry.
+
+* The New Way (IVF Search)
+
+    Step A: Coarse Search (Find the District) Instead of looking at houses, you only look at the 1,024 Delivery Stations. You calculate: "Which station is closest to this new order address?" You find that Station #5 (and maybe its neighbors, Station #6 and #7) is the closest.
+    
+    Step B: Fine Search (Last Mile) You open the list for Station #5. It only serves 15,000 customers. You only check these specific houses. Result: You found the target in 15 milliseconds. The pizza is still hot.
 
 
-### Why K-Mean training could be accerlated by using Cuda?
+### Why K-Means training could be accelerated by using CUDA?
 The core task—calculating distances for millions of vectors—is "embarrassingly parallel." Since every vector can be processed independently, we can launch millions of threads to instantly saturate the GPU's thousands of cores, achieving a speedup that CPUs simply cannot match.
 
 ---
@@ -66,8 +80,8 @@ The key shows in maximizing parallelism and efficiency across the two main K-Mea
 
 |name|Component | Description | **Acceleration & Optimization** | function 
 | :---|:--- | :--- | :--- | :---|
-|**E-step**| **Massive Parallel steps (Assignment)** | Utilizing the GPU's SIMT (Single Instruction, Multiple Threads) architecture, each of the $N$ data points is assigned a dedicated thread to calculate its distance to all $K$ centroids independently. | Compute-Bound Optimization: This transforms the heavy $O(N \times K)$ matrix operation into a massively parallel workload. It fully saturates the GPU's CUDA cores and hides memory latency through high arithmetic intensity. | **assignAndAccumulateKernel**|
-|**M-step**| **GPU-Optimized M-step (Relocation)** | Uses thread-safe **`atomicAdd`** operations to efficiently accumulate the vector sums and counts for each of the $K$ partitions (clusters). | Minimizes synchronization and reduces the overall training time. | **updateCentroidsKernel**|
+|**E-step** (Expectation) | **Massive Parallel steps (Assignment)** | Utilizing the GPU's SIMT (Single Instruction, Multiple Threads) architecture, each of the $N$ data points is assigned a dedicated thread to calculate its distance to all $K$ centroids independently. | Compute-Bound Optimization: This transforms the heavy $O(N \times K)$ matrix operation into a massively parallel workload. It fully saturates the GPU's CUDA cores and hides memory latency through high arithmetic intensity. | **assignAndAccumulateKernel**|
+|**M-step** (Maximization) | **GPU-Optimized M-step (Relocation)** | Uses thread-safe **`atomicAdd`** operations to efficiently accumulate the vector sums and counts for each of the $K$ partitions (clusters). | Minimizes synchronization and reduces the overall training time. | **updateCentroidsKernel**|
 
 
 ```c++
@@ -190,7 +204,7 @@ These define the scale and quality of the partitioning infrastructure:
 
 To validate the efficiency and quality of the accelerated K-Means output, we perform a subsequent ANN Search Verification step.
 
-after The process of training, code will generates $K$ highly optimized centroids and assigns $N$ data points to one of these $K$ partitions.And Convert them into $K$ number of IVFs (Inverted File Index)| This output is the last critical stage for building the ANN search structure
+After the process of training, the code will generates $K$ highly optimized centroids and assigns $N$ data points to one of these $K$ partitions. And Convert them into $K$ number of IVFs (Inverted File Index)| This output is the last critical stage for building the ANN search structure
 
 ```c++
 
