@@ -5,6 +5,10 @@ This project focuses on delivering a highly optimized, GPU-accelerated implement
 The core objective is to minimize the time required to partition massive, high-dimensional vector datasets, thereby enabling rapid construction of the search structure.
 
 ---
+# Short Video Presentation of Project
+https://github.com/user-attachments/assets/c9d61d15-90ee-427b-bc4f-7a880d99cc32
+
+---
 ## What is K-Means and what are its applications?
 
 K-Means is an algorithm used to partition $N$ data points into $K$ pre-defined, non-overlapping clusters (or groups).
