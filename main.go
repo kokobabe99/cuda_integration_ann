@@ -90,7 +90,6 @@ type KMeansANN struct {
 	rng       *rand.Rand
 }
 
-// 构建：输入全量向量，训练 k-means 并建立倒排表
 func NewKMeansANN(all []vec, k, maxIters int) *KMeansANN {
 	if k <= 1 {
 		k = 2
@@ -140,7 +139,6 @@ func (a *KMeansANN) trainKMeansPlusPlus(all []vec, k, maxIters int) ([]vec, []in
 			sum += dist2[i]
 		}
 		if sum == 0 {
-			// 数据都重合，复制一个中心
 			centroids = append(centroids, append(vec(nil), all[a.rng.Intn(n)]...))
 			continue
 		}
@@ -157,10 +155,8 @@ func (a *KMeansANN) trainKMeansPlusPlus(all []vec, k, maxIters int) ([]vec, []in
 		centroids = append(centroids, append(vec(nil), all[chosen]...))
 	}
 
-	// 3) Lloyd 迭代
 	assign := make([]int, n)
 	for it := 0; it < maxIters; it++ {
-		// E-step: 重新分配
 		changed := 0
 		for i := 0; i < n; i++ {
 			bestC := 0
@@ -203,7 +199,7 @@ func (a *KMeansANN) trainKMeansPlusPlus(all []vec, k, maxIters int) ([]vec, []in
 			for j := 0; j < dim; j++ {
 				sums[c][j] /= float32(counts[c])
 			}
-			normInPlace(sums[c]) // 归一化中心，配合 cosine
+			normInPlace(sums[c])
 			centroids[c] = sums[c]
 		}
 
@@ -244,13 +240,11 @@ func (a *KMeansANN) Search(q vec, topK, nprobe int) ([]int, []float32) {
 	sort.Slice(cs, func(i, j int) bool { return cs[i].dist < cs[j].dist })
 	cs = cs[:nprobe]
 
-	// 2) 收集候选（这些簇内所有点）
 	cands := make([]int, 0)
 	for _, t := range cs {
 		cands = append(cands, a.lists[t.c]...)
 	}
 
-	// 3) 在候选中精确算 TopK
 	type pair struct {
 		id   int
 		dist float32
@@ -276,7 +270,6 @@ func (a *KMeansANN) Search(q vec, topK, nprobe int) ([]int, []float32) {
  *   Demo   *
  ************/
 
-// 生成一张随机 Bingo（简单：1..75 里取 25 个不重复数）
 func genRandomCard(rng *rand.Rand) [25]int {
 	p := rng.Perm(75)
 	var c [25]int
@@ -320,7 +313,6 @@ func main() {
 		embs[i] = cardToVec(cards[i])
 	}
 
-	// --- 构建 K-Means ANN ---
 	kClusters := 64
 	maxIters := 25
 	buildStart := time.Now()
