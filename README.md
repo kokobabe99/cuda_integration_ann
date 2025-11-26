@@ -84,8 +84,8 @@ The key shows in maximizing parallelism and efficiency across the two main K-Mea
 
 |name|Component | Description | **Acceleration & Optimization** | function 
 | :---|:--- | :--- | :--- | :---|
-|**E-step** (Expectation) | **Massive Parallel steps (Assignment)** | Utilizing the GPU's SIMT (Single Instruction, Multiple Threads) architecture, each of the $N$ data points is assigned a dedicated thread to calculate its distance to all $K$ centroids independently. | Compute-Bound Optimization: This transforms the heavy $O(N \times K)$ matrix operation into a massively parallel workload. It fully saturates the GPU's CUDA cores and hides memory latency through high arithmetic intensity. | **assignAndAccumulateKernel**|
-|**M-step** (Maximization) | **GPU-Optimized M-step (Relocation)** | Uses thread-safe **`atomicAdd`** operations to efficiently accumulate the vector sums and counts for each of the $K$ partitions (clusters). | Minimizes synchronization and reduces the overall training time. | **updateCentroidsKernel**|
+|**E-step**| **Massive Parallel steps (Assignment)** | Utilizing the GPU's massive parallelism, each of the $N$ data points is assigned a dedicated thread to calculate its distance to all $K$ centroids. It also includes the accumulation of vector sums and counts using optimized methods. | Compute-Bound Optimization: This transforms the heavy $O(N \times K)$ matrix operation into a massively parallel workload. It also features Per-Block Privatization to eliminate global atomicAdd contention. | **assignAndAccumulateKernel**|
+|**M-step**| **Final Centroid Update (Mean & Normalize）** | Calculates Centroid Mean and Normalization: It computes the average vector for each cluster by dividing the total accumulated vector sums (received from the E-step) by the counts, then normalizes the resulting vector. |The M-step focuses on memory efficiency and arithmetic intensity. Coalesced memory accesses are used to efficiently read accumulated partial sums and counts from global memory. Each centroid update is parallelized across GPU threads, while SIMD-style normalization minimizes branching and improves warp execution efficiency. | **updateCentroidsKernel**|
 
 
 ```c++
@@ -132,10 +132,8 @@ __global__ void assignAndAccumulateKernel(const float* data,      // [Input] Dat
                 bestC = c;
             }
         }
-
         // Record the assignment result for data point i
         assign[i] = bestC;
-
         // Atomic add to accumulators (Atomic operations resolve concurrent write conflicts)
         // Accumulate count
         atomicAdd(&counts[bestC], 1);
