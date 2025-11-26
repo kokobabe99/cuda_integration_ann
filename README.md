@@ -25,7 +25,115 @@ It is one of the most fundamental and widely used Unsupervised Machine Learning 
 
 
 ## How is K-means trained in C++ code?
+```c++
+// ---------------- Device: Distance Kernels (Simulated for Training) ----------------
 
+/**
+ * E-Step: Assign data to nearest centroid & Accumulate stats
+ * * This function simulates the "Expectation" step of K-Means.
+ * It iterates through every data point, finds the closest centroid (using Cosine Distance),
+ * assigns the point to that cluster, and accumulates the vector sums and counts
+ * needed for the next update step.
+ */
+void assignAndAccumulateKernel(const float* data,
+                                  int N_points,
+                                  const float* centroids,
+                                  int K_clusters,
+                                  int* assign,
+                                  float* sums,
+                                  int* counts) {
+    
+    // Loop 1: Iterate through every single data point (0 to N-1)
+    for (int i = 0; i < N_points; i++) {
+        
+        // Get pointer to the current data vector (Dimension = DIM)
+        const float* xi = data + (size_t)i * DIM;
+
+        int bestC = 0;          // Store the index of the nearest cluster
+        float bestD = 1e30f;    // Initialize minimum distance to a large value
+
+        // Loop 2: Compare current point 'xi' against all K centroids
+        for (int c = 0; c < K_clusters; ++c) {
+            const float* ctr = centroids + (size_t)c * DIM;
+            
+            // Calculate Dot Product (Inner Product)
+            float dot = 0.f;
+            for (int d = 0; d < DIM; ++d) dot += xi[d] * ctr[d];
+
+            // Convert Cosine Similarity to Cosine Distance
+            // Distance = 1.0 - Similarity
+            float dist = 1.f - dot;
+
+            // Keep track of the nearest centroid found so far
+            if (dist < bestD) {
+                bestD = dist;
+                bestC = c;
+            }
+        }
+
+        // 1. Record the assignment: Point 'i' belongs to Cluster 'bestC'
+        assign[i] = bestC;
+
+        // 2. Accumulate count: Increment the member count for this cluster
+        counts[bestC]++;
+
+        // 3. Accumulate sums: Add this vector's coordinates to the cluster's total
+        // This prepares for the average calculation in the next step.
+        size_t base = (size_t)bestC * DIM;
+        for (int d = 0; d < DIM; ++d) {
+            sums[base + d] += xi[d];
+        }
+    }
+}
+
+/**
+ * M-Step: Update Centroids
+ * * This function simulates the "Maximization" step of K-Means.
+ * It calculates the new position of each centroid by averaging the vectors 
+ * assigned to it, and then normalizes the result to ensure it stays on the unit hypersphere.
+ */
+void updateCentroidsKernel(float* centroids,
+                                  const float* sums,
+                                  const int* counts,
+                                  int K_clusters) {
+    
+    // Loop 1: Iterate through every cluster (0 to K-1)
+    for (int c = 0; c < K_clusters; c++) {
+        
+        int cnt = counts[c];    // Number of points in this cluster
+        
+        // Pointers to the current centroid and its accumulated sum
+        float* ctr = centroids + (size_t)c * DIM;
+        const float* sumc = sums + (size_t)c * DIM;
+    
+        // Only update if the cluster is not empty
+        if (cnt > 0) {
+            double norm2 = 0.0;
+
+            // Loop 2: Calculate the Mean (Average) Vector
+            for (int d = 0; d < DIM; ++d) {
+                // New Coordinate = Total Sum / Count
+                float v = sumc[d] / (float)cnt;
+                ctr[d] = v;
+
+                // Accumulate squared magnitude for normalization later
+                norm2 += (double)v * (double)v;
+            }
+
+            // Calculate the L2 Norm (Euclidean length)
+            // Added 1e-12 to prevent division by zero
+            float n = float(std::sqrt(norm2) + 1e-12);
+
+            // Loop 3: Normalization
+            // Since we use Cosine Distance, centroids must be normalized 
+            // (length = 1.0) to lie on the unit sphere.
+            for (int d = 0; d < DIM; ++d) {
+                ctr[d] /= n;
+            }
+        }
+    }
+}
+```
 ---
 
 ## An example case to illustrate K-means
